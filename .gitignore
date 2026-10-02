@@ -1,0 +1,18 @@
+
+
+plan/
+data/
+config/
+.env
+docs/
+adr/
+skill/
+
+# Python build and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+archive/
+.DS_Store
+__init__.py

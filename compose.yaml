@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: trr339-rdm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rdm
+      POSTGRES_USER: rdm
+      POSTGRES_PASSWORD: rdm
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - rdm_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rdm -d rdm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  rdm_postgres_data:

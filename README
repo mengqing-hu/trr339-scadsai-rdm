@@ -1,0 +1,162 @@
+# TRR 339 RDM Assistant
+
+Traceable question answering over the TRR 339 RDM manual. The MVP uses LlamaIndex for Markdown parsing, ScaDS.AI for embeddings and answer generation, and PostgreSQL with pgvector for versioned vector retrieval.
+
+## Scope
+
+- Parse `data/Manual-RDM.md` into text and Markdown table chunks.
+- Build and atomically activate a versioned pgvector index.
+- Run pure vector retrieval against the active document version.
+- Generate evidence-grounded answers and persist sources, model usage, and timings.
+- Provide a Streamlit chat interface.
+
+## Architecture
+
+The application has two main workflows:
+
+```text
+Document ingestion:
+Markdown -> LlamaIndex parsing -> embeddings -> versioned pgvector index
+
+Question answering:
+User question -> query embedding -> vector retrieval -> evidence-only generation
+               -> persisted answer, citations, model usage, and latency metrics
+```
+
+### Main Components
+
+| Component | Responsibility |
+| --- | --- |
+| `app.py` | Streamlit entry point, runtime initialization, chat orchestration, and citation rendering. |
+| `src/settings.py` | Loads YAML and environment configuration and validates runtime settings. |
+| `src/parsing.py` | Parses Markdown chapters, text chunks, and table elements with LlamaIndex. |
+| `src/ingestion.py` | Validates source files, creates embeddings, stores chunks, and activates document versions. |
+| `src/retrieval.py` | Runs active-version vector search, applies section diversity, and groups citations. |
+| `src/scads_client.py` | Wraps the OpenAI-compatible ScaDS.AI embedding and chat APIs. |
+| `src/llama_client.py` | Adapts the ScaDS.AI chat model for LlamaIndex table summarization. |
+| `src/chat.py` | Persists conversations, answer runs, assistant messages, and citations transactionally. |
+| `src/db.py` | Defines SQLAlchemy models, PostgreSQL/pgvector types, and session helpers. |
+| `scripts/ingest_documents.py` | CLI entry point for rebuilding the document index. |
+
+## Document Ingestion Flow
+
+The ingestion implementation is in `src/ingestion.py` and can be triggered from the CLI or the Streamlit sidebar.
+
+1. Validate that the Markdown source is inside the configured data root.
+2. Calculate the source document SHA-256 hash.
+3. Return the previous successful job when the same content was already indexed.
+4. Create a running ingestion job and a `BUILDING` document version.
+5. Parse Markdown with an explicitly configured LlamaIndex LLM.
+6. Convert text and table nodes into persistable chunks.
+7. Request embeddings in batches from ScaDS.AI.
+8. Validate chunk content, hashes, stable IDs, and embedding dimensions.
+9. Persist chunks in PostgreSQL.
+10. Mark the previous active version as `SUPERSEDED` and atomically activate the new version.
+
+If any step fails, the new version is marked `FAILED` and the previous active version remains available.
+
+## Question Answering Flow
+
+The main request path is implemented in `app.py`.
+
+1. Append the user message with a monotonic sequence number.
+2. Create an `AnswerRun` with status `RUNNING` and commit the audit record before external calls.
+3. Embed the question through ScaDS.AI.
+4. Search chunks from the active document version using pgvector cosine distance.
+5. Fetch an expanded candidate pool, cap results per section, and apply the optional similarity threshold.
+6. Persist all retrieval results and mark the context-selected results.
+7. If no result passes the threshold, return a safe no-evidence response.
+8. Otherwise, send only the selected manual evidence to the chat model.
+9. Persist the assistant message, citations, token usage, model names, and latency metrics.
+
+The generation prompt explicitly instructs the model to answer only from the supplied evidence and to state when the evidence is insufficient.
+
+## Data Model
+
+The central persistence relationships are:
+
+```text
+Document
+  └── DocumentVersion
+        └── Chunk
+
+Conversation
+  └── Message
+        └── AnswerRun
+              └── RetrievalResult
+                    └── MessageCitation
+```
+
+The database also contains models for users, feedback, conversation summaries, and history embeddings. These are currently reserved for future features and are not part of the active question-answering path.
+
+## Configuration
+
+Non-secret defaults are stored in `config/config.yaml`. Local secrets and environment-specific overrides belong in `.env`. Environment variables take precedence over YAML values.
+
+Required settings:
+
+```env
+SCADS_API_URL=
+SCADS_API_KEY=
+DATABASE_URL=postgresql+psycopg://rdm:rdm@localhost:5433/rdm
+```
+
+Important optional settings include:
+
+- `CHAT_MODEL`
+- `EMBEDDING_MODEL`
+- `CHUNK_SIZE_TOKENS`
+- `CHUNK_OVERLAP_TOKENS`
+- `RETRIEVAL_TOP_K`
+- `RETRIEVAL_SIMILARITY_THRESHOLD`
+- `REQUEST_TIMEOUT_SECONDS`
+- `MAX_RETRIES`
+- `EMBEDDING_BATCH_SIZE`
+
+## Setup
+
+Use Python 3.13 or newer and install the project dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+Copy `.env.example` to `.env`, then set `SCADS_API_URL`, `SCADS_API_KEY`, and `DATABASE_URL`.
+
+## Run Locally
+
+Start PostgreSQL with pgvector. Docker Desktop must be running:
+
+```bash
+docker compose up -d
+```
+
+Apply the schema:
+
+```bash
+PYTHONPATH=. alembic upgrade head
+```
+
+Build the document index:
+
+```bash
+PYTHONPATH=. python scripts/ingest_documents.py
+```
+
+Start the Streamlit application:
+
+```bash
+PYTHONPATH=. streamlit run app.py
+```
+
+Open the URL printed by Streamlit. Use the sidebar action to rebuild the document index after `Manual-RDM.md` changes.
+
+## Verification
+
+```bash
+PYTHONPATH=. python -m unittest discover -s tests -v
+python -m compileall -q src migrations tests app.py scripts
+docker compose config
+```
+
